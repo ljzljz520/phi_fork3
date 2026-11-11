@@ -190,20 +190,53 @@ func sessionIDFromFilename(name string) (string, bool) {
 }
 
 // DeleteSession removes the JSONL file backing id from dir. id follows
-// FindSessionFile rules (exact or unique prefix).
+// FindSessionFile rules (exact or unique prefix). A session owned by a live
+// process cannot be removed: the writer would keep appending to an unlinked
+// file, so contention returns ErrSessionLocked instead.
 func DeleteSession(dir, id string) error {
 	path, err := FindSessionFile(dir, id)
 	if err != nil {
 		return err
 	}
+	lock, err := acquireSessionLock(path)
+	if err != nil {
+		return fmt.Errorf("session: delete %s: %w", id, err)
+	}
 	if err := os.Remove(path); err != nil {
+		lock.release()
 		return fmt.Errorf("session: delete %s: %w", path, err)
 	}
+	lock.release()
 	return nil
 }
 
-// OpenSession loads a JSONL session file and returns a Manager ready to append.
+// OpenSession loads a JSONL session file as a read-only replay view. It never
+// takes ownership, so listings and replays work while another process has the
+// session open; mutating the returned Manager fails with ErrSessionNotOwner.
+// Use OpenOwnedSession to resume a session for writing.
 func OpenSession(path string) (*Manager, error) {
+	return openSessionFile(path)
+}
+
+// OpenOwnedSession loads a JSONL session file and claims exclusive ownership
+// of it. If another live process already owns the session it returns
+// ErrSessionLocked and nothing is loaded. Ownership is released by Close.
+func OpenOwnedSession(path string) (*Manager, error) {
+	lock, err := acquireSessionLock(path)
+	if err != nil {
+		return nil, err
+	}
+	m, err := openSessionFile(path)
+	if err != nil {
+		lock.release()
+		return nil, err
+	}
+	m.lock = lock
+	return m, nil
+}
+
+// openSessionFile reads path into a Manager without claiming ownership.
+func openSessionFile(path string) (*Manager, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

@@ -106,7 +106,7 @@ func NewSession(opts ...SessionOption) (*Session, error) {
 				return nil, err
 			}
 		}
-		m, err := session.OpenSession(path)
+		m, err := session.OpenOwnedSession(path)
 		if err != nil {
 			return nil, err
 		}
@@ -144,6 +144,16 @@ func (s *Session) ID() string {
 		return ""
 	}
 	return s.manager.ID()
+}
+
+// Close releases cross-process ownership of the persisted session. It is
+// idempotent and safe on in-memory sessions. After Close the session stays
+// readable but rejects further writes.
+func (s *Session) Close() error {
+	if s == nil || s.manager == nil {
+		return nil
+	}
+	return s.manager.Close()
 }
 
 // File returns the JSONL path, or empty in memory mode / before first flush path assignment.

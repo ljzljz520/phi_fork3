@@ -36,10 +36,17 @@ func TestSessionPersistRoundTrip(t *testing.T) {
 	got := messageContents(loaded.BuildContext())
 	assert.Equal(t, orig, got)
 
-	// Append continues on the same file.
-	_, err = loaded.Append(llm.Message{Role: llm.RoleUser, Content: "continue"})
+	// Append continues on the same file, but only the exclusive owner may
+	// write: release the creating manager before reopening for writing.
+	require.NoError(t, m.Close())
+	owner, err := OpenOwnedSession(path)
 	require.NoError(t, err)
-	_, err = loaded.Append(llm.Message{Role: llm.RoleAssistant, Content: "ok"})
+	defer func() { _ = owner.Close() }()
+
+	// Append continues on the same file.
+	_, err = owner.Append(llm.Message{Role: llm.RoleUser, Content: "continue"})
+	require.NoError(t, err)
+	_, err = owner.Append(llm.Message{Role: llm.RoleAssistant, Content: "ok"})
 	require.NoError(t, err)
 
 	info, err := os.Stat(path)
@@ -48,7 +55,7 @@ func TestSessionPersistRoundTrip(t *testing.T) {
 
 	reloaded, err := OpenSession(path)
 	require.NoError(t, err)
-	assert.Equal(t, messageContents(loaded.BuildContext()), messageContents(reloaded.BuildContext()))
+	assert.Equal(t, messageContents(owner.BuildContext()), messageContents(reloaded.BuildContext()))
 }
 
 func TestSessionModelChangesAppendOnly(t *testing.T) {

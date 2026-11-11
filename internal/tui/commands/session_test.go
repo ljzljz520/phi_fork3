@@ -110,6 +110,9 @@ func TestSessionCommands_DeleteRemovesAndRefreshes(t *testing.T) {
 	require.NoError(t, err)
 	_, err = other.Append(llm.Message{Role: llm.RoleAssistant, Content: "ok"})
 	require.NoError(t, err)
+	// A live owner cannot be deleted; the fixture releases ownership like a
+	// process exiting.
+	require.NoError(t, other.Close())
 
 	bus := controller.NewBus(nil)
 	var refreshed []session.SessionMeta
@@ -166,4 +169,33 @@ func TestSessionCommands_DeleteUnknownIdToastsAndKeepsList(t *testing.T) {
 	s.Delete("nosuchsession")
 	assert.Contains(t, drainToast(t, bus), "not found")
 	assert.False(t, refreshed, "failed delete must not touch the picker")
+}
+
+func TestSessionCommands_DeleteLiveOwnerToastsAndKeepsList(t *testing.T) {
+	dir := t.TempDir()
+	current, err := session.NewSessionManager(dir, session.WithSessionDir(dir), session.WithShouldFlush(true))
+	require.NoError(t, err)
+	live, err := session.NewSessionManager(dir, session.WithSessionDir(dir), session.WithShouldFlush(true))
+	require.NoError(t, err)
+	_, err = live.Append(llm.Message{Role: llm.RoleUser, Content: "open elsewhere"})
+	require.NoError(t, err)
+	_, err = live.Append(llm.Message{Role: llm.RoleAssistant, Content: "busy"})
+	require.NoError(t, err)
+
+	bus := controller.NewBus(nil)
+	var refreshed bool
+	s := &SessionCommands{
+		Bus:           bus,
+		SessionDir:    func() string { return dir },
+		SessionID:     func() string { return current.ID() },
+		RefreshPicker: func([]session.SessionMeta, string) { refreshed = true },
+	}
+	s.Delete(live.ID())
+
+	assert.Contains(t, drainToast(t, bus), "open in another process")
+	assert.False(t, refreshed, "a refused delete must not touch the picker")
+	list, err := session.ListSessions(dir)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "the owned session file must survive a refused delete")
+	assert.Equal(t, live.ID(), list[0].ID)
 }

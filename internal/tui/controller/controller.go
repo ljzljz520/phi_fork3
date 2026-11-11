@@ -578,8 +578,6 @@ func (c *EngineController) Resume(id string) (cwdWarning string, err error) {
 	}
 
 	extRunner := loadExtensions(c.proj)
-	c.commitSessionSwitch("resume", prevID, id)
-	c.swapExtensionRunner(extRunner)
 	eng, cfg, err := c.openEngine(cfg, extRunner, id)
 	if err != nil {
 		return "", err
@@ -587,6 +585,10 @@ func (c *EngineController) Resume(id string) (cwdWarning string, err error) {
 	if sessCwd := eng.SessionCwd(); sessCwd != "" && c.cwd != "" && sessCwd != c.cwd {
 		cwdWarning = fmt.Sprintf("cwd %s ≠ %s", filepath.Base(sessCwd), filepath.Base(c.cwd))
 	}
+	// The replacement has already claimed ownership; only now may the old
+	// session release its lock, so a failed open leaves it active and owned.
+	c.commitSessionSwitch("resume", prevID, id)
+	c.swapExtensionRunner(extRunner)
 	c.activateSession(eng, cfg, "resume", prevID)
 	return cwdWarning, nil
 }
@@ -602,11 +604,11 @@ func (c *EngineController) NewSession() error {
 	if err != nil {
 		return err
 	}
-	c.commitSessionSwitch("new", prevID, "")
 	engine, cfg, err := c.openEngine(cfg, c.Extensions(), "")
 	if err != nil {
 		return err
 	}
+	c.commitSessionSwitch("new", prevID, "")
 	c.activateSession(engine, cfg, "new", prevID)
 	return nil
 }
@@ -627,12 +629,12 @@ func (c *EngineController) ForkSession() (string, error) {
 	}
 	cfg, err := c.resolveModel()
 	if err != nil {
-		c.discardFork(forked.ID())
+		c.discardFork(forked)
 		return "", err
 	}
 	eng, err := c.newEngine(cfg, c.Extensions(), forked)
 	if err != nil {
-		c.discardFork(forked.ID())
+		c.discardFork(forked)
 		return "", err
 	}
 	c.commitSessionSwitch("fork", prevID, forked.ID())
@@ -649,9 +651,12 @@ func (c *EngineController) activateSession(eng *agent.Engine, cfg llm.ModelConfi
 	c.emitSessionStart(reason, eng.SessionID(), prevID)
 }
 
-// discardFork drops a fork the controller never switched to, so a failed switch
-// does not leave an unreachable session in the session list.
-func (c *EngineController) discardFork(id string) {
+// discardFork drops a fork the controller never switched to. Close releases
+// its ownership first so the file can actually be removed; a failed switch
+// must not leave an unreachable, permanently-locked session in the list.
+func (c *EngineController) discardFork(forked *agent.Session) {
+	id := forked.ID()
+	_ = forked.Close()
 	if err := session.DeleteSession(c.sessionDir, id); err != nil {
 		debuglog.Logf("session: drop unused fork %s: %v", id, err)
 	}
@@ -677,11 +682,15 @@ func (c *EngineController) preflightSessionSwitch(reason, targetID string) (prev
 }
 
 // commitSessionSwitch retires the outgoing session: the in-flight stream is
-// cancelled and extensions see session_shutdown before the new engine is
-// installed.
+// cancelled, extensions see session_shutdown, and the old manager releases its
+// ownership. The replacement engine must already hold its own lock, so a
+// failed open never reaches this point and the previous session stays owned.
 func (c *EngineController) commitSessionSwitch(reason, prevID, targetID string) {
 	c.Cancel()
 	c.sessionShutdown(reason, prevID, targetID)
+	if c.engine != nil {
+		_ = c.engine.Session().Close()
+	}
 }
 
 func (c *EngineController) resolveModel() (llm.ModelConfig, error) {
@@ -803,6 +812,9 @@ func (c *EngineController) CurrentLoop(gen int) bool {
 func (c *EngineController) Close() {
 	c.sessionShutdown("quit", c.SessionID(), "")
 	c.Cancel()
+	if c.engine != nil {
+		_ = c.engine.Session().Close()
+	}
 	c.unsubJobs()
 	_ = c.jobs.Close(context.Background())
 	if c.mcpPool != nil {

@@ -139,6 +139,9 @@ func main() {
 
 	target, err := ctrl.engine.Session().Fork()
 	require.NoError(t, err)
+	// The forked session owns its file until handed off; Resume reclaims that
+	// ownership, so release the fork handle first.
+	require.NoError(t, target.Close())
 	_, err = ctrl.Resume(target.ID())
 	require.NoError(t, err)
 

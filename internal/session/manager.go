@@ -20,6 +20,12 @@ import (
 // from the current leaf back to the session root, honoring compaction.
 //
 // It is safe for concurrent use: mutations and reads take the internal lock.
+//
+// A persisting manager owns its session file exclusively (see lock.go): only
+// one Manager across all processes may append, and a Manager created by
+// OpenSession is a read-only replay view whose mutations fail with
+// ErrSessionNotOwner. Close releases ownership; writes after Close fail with
+// ErrSessionClosed instead of landing on an unowned file.
 type Manager struct {
 	mu              sync.Mutex
 	cwd             string
@@ -32,6 +38,8 @@ type Manager struct {
 	sessionID       string
 	config          ManagerConfig
 	hasAssistantMsg bool
+	lock            *sessionLock // nil for in-memory or read-only replay views
+	closed          bool
 }
 
 // ManagerConfig holds the options used to build a Manager.
@@ -122,8 +130,17 @@ func NewSessionManager(sessionPath string, opt ...ManagerOption) (*Manager, erro
 		}
 		fileTimestamp := time.Now().Format("2006-01-02T15-04-05")
 		m.sessionFile = filepath.Join(config.sessionDir, fmt.Sprintf("%s_%s.jsonl", fileTimestamp, m.sessionID))
+		// Claim ownership before the first entry exists: two processes must
+		// never build managers for the same persisted session, even one that
+		// has not flushed its JSONL yet.
+		lock, err := acquireSessionLock(m.sessionFile)
+		if err != nil {
+			return nil, err
+		}
+		m.lock = lock
 	}
 	if err := m.SetModel(config.model); err != nil {
+		m.lock.release()
 		return nil, err
 	}
 	return m, nil
@@ -180,7 +197,9 @@ func (sm *Manager) BuildContext() []MessageEntry {
 func (sm *Manager) Append(msg llm.Message) (string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
+	if err := sm.checkWritable(); err != nil {
+		return "", err
+	}
 	entry := SessionMessageEntry{
 		SessionBaseEntry: SessionBaseEntry{
 			Type:      EntryMessage,
@@ -203,7 +222,9 @@ func (sm *Manager) Append(msg llm.Message) (string, error) {
 func (sm *Manager) AppendBash(command, output string, exitCode int, cancelled bool) (string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
+	if err := sm.checkWritable(); err != nil {
+		return "", err
+	}
 	entry := SessionMessageEntry{
 		SessionBaseEntry: SessionBaseEntry{
 			Type:      EntryMessage,
@@ -280,7 +301,8 @@ func (sm *Manager) Fork() (*Manager, error) {
 	}
 	// The loader is the only reader of a session file, so let it build the
 	// manager: leaf, parents, assistant flag, and cwd come out by construction.
-	fork, err := OpenSession(path)
+	// The fork file was created O_EXCL, so ownership cannot be contended.
+	fork, err := OpenOwnedSession(path)
 	if err != nil {
 		if removeErr := os.Remove(path); removeErr != nil {
 			err = errors.Join(err, fmt.Errorf("remove unused fork %s: %w", path, removeErr))
@@ -317,6 +339,9 @@ func (sm *Manager) modelName() string {
 func (sm *Manager) SetModel(name string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if err := sm.checkWritable(); err != nil {
+		return err
+	}
 	if sm.modelName() == name {
 		return nil
 	}
@@ -343,7 +368,9 @@ func (sm *Manager) SetModel(name string) error {
 func (sm *Manager) AppendCompaction(compaction Compaction) (string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
+	if err := sm.checkWritable(); err != nil {
+		return "", err
+	}
 	entry := CompactionEntry{
 		SessionBaseEntry: SessionBaseEntry{
 			Type:      EntryCompaction,
@@ -357,6 +384,19 @@ func (sm *Manager) AppendCompaction(compaction Compaction) (string, error) {
 		return "", err
 	}
 	return entry.ID, nil
+}
+
+// checkWritable enforces single-writer ownership. In-memory managers need no
+// lock; persisting managers must hold one, and no manager survives Close.
+// Callers must hold sm.mu.
+func (sm *Manager) checkWritable() error {
+	if sm.closed {
+		return ErrSessionClosed
+	}
+	if sm.shouldFlush && sm.lock == nil {
+		return ErrSessionNotOwner
+	}
+	return nil
 }
 
 func (sm *Manager) appendEntry(entry MessageEntry) error {
@@ -440,6 +480,24 @@ func (sm *Manager) Len() int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return len(sm.entries)
+}
+
+// Close releases cross-process ownership. It is idempotent. Afterwards the
+// manager stays readable for replay but every mutation fails with
+// ErrSessionClosed, so a retired writer can never append to an unowned file.
+func (sm *Manager) Close() error {
+	sm.mu.Lock()
+	if sm.closed {
+		sm.mu.Unlock()
+		return nil
+	}
+	sm.closed = true
+	lock := sm.lock
+	sm.lock = nil
+	sm.mu.Unlock()
+
+	lock.release()
+	return nil
 }
 
 func generateSessionID() string {

@@ -14,6 +14,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Persistent sessions now have cross-process single-writer ownership. A
+  sidecar `.lock` next to each session JSONL is held with an exclusive kernel
+  lock (flock on Unix, LockFileEx on Windows) for the writer's whole lifetime,
+  so resuming a session that is already open in another terminal or headless
+  process fails with an actionable "session is open in another process (held
+  by pid ...)" error instead of two writers silently growing separate
+  branches. Session lists and replay stay readable through a lock-free
+  read-only open, while writes from a read-only or already-closed manager now
+  fail explicitly. Switching sessions claims the new ownership before
+  releasing the old one, so a failed resume/fork keeps the original session
+  active and owned; deleting a live-owned session is refused. The kernel
+  releases the lock on process exit, including crashes and SIGKILL, so
+  ownership is always reclaimable.
 - The compaction marker in the transcript now expands to show the summary that
   replaced the cut history. Clicking the marker (or Enter, where the block has
   keyboard focus) reveals it, so a user can check what a compaction dropped

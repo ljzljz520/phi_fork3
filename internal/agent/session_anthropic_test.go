@@ -63,6 +63,9 @@ func TestSessionAnthropicContinuation(t *testing.T) {
 	require.NotNil(t, final.ProviderState)
 	require.Len(t, final.ProviderState.Data.Items, 4)
 	require.NoError(t, sess.Append(*final))
+	// Resume claims exclusive ownership: the creating session must release it
+	// first, as a real process would on exit.
+	require.NoError(t, sess.Close())
 	resumed, err := NewSession(WithResumePath(sess.File()))
 	require.NoError(t, err)
 	history := resumed.BuildContext()
@@ -116,6 +119,7 @@ func TestSessionNativeCompaction(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sess.SetModel("after-compaction"))
 	require.NoError(t, sess.Append(llm.Message{Role: llm.RoleAssistant, ProviderState: state}))
+	require.NoError(t, sess.Close())
 	resumed, err := NewSession(WithResumePath(sess.File()))
 	require.NoError(t, err)
 	for _, current := range []*Session{sess, resumed} {

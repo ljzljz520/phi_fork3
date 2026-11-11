@@ -81,6 +81,11 @@ func forkSession(args []string) error {
 	if err != nil {
 		return err
 	}
+	// This process only creates the fork; release its ownership so the user
+	// can resume it from another terminal immediately.
+	if err := fork.Close(); err != nil {
+		return err
+	}
 	fmt.Println(fork.ID())
 	return nil
 }

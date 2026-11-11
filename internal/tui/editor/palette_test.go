@@ -222,6 +222,9 @@ func TestModelPaletteSavesDefaultAndRestoresSession(t *testing.T) {
 	_, err = previous.Append(llm.Message{Role: llm.RoleAssistant, Content: "done"})
 	require.NoError(t, err)
 	firstID := previous.ID()
+	// The fixture only seeds the file; release ownership so a later Resume can
+	// claim it.
+	require.NoError(t, previous.Close())
 	require.NoError(t, ctrl.NewSession())
 
 	p = openModel("secondary")

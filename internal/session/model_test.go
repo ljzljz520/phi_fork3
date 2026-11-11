@@ -33,26 +33,42 @@ func TestModelChangesBeforeFirstFlush(t *testing.T) {
 	assert.Equal(t, []string{"initial", "second", "third"}, names)
 }
 
-func TestModelChangePreservesOtherAppends(t *testing.T) {
+func TestReadOnlyManagerRejectsWrites(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewSessionManager(dir, WithSessionDir(dir), WithShouldFlush(true), WithModel("initial"))
 	require.NoError(t, err)
+	defer func() { _ = m.Close() }()
 	_, err = m.Append(llm.Message{Role: llm.RoleAssistant, Content: "first"})
-	require.NoError(t, err)
-	other, err := OpenSession(m.File())
-	require.NoError(t, err)
-	_, err = other.Append(llm.Message{Role: llm.RoleUser, Content: "appended by another reader"})
 	require.NoError(t, err)
 	before, err := os.ReadFile(m.File())
 	require.NoError(t, err)
-	require.NoError(t, m.SetModel("next"))
+
+	// A second opener while the owner is alive gets a read-only replay view.
+	other, err := OpenSession(m.File())
+	require.NoError(t, err)
+	_, err = other.Append(llm.Message{Role: llm.RoleUser, Content: "appended by another reader"})
+	assert.ErrorIs(t, err, ErrSessionNotOwner)
+	assert.ErrorIs(t, other.SetModel("next"), ErrSessionNotOwner)
+	_, err = other.AppendCompaction(Compaction{Summary: "x"})
+	assert.ErrorIs(t, err, ErrSessionNotOwner)
+	_, err = other.AppendBash("ls", "", 0, false)
+	assert.ErrorIs(t, err, ErrSessionNotOwner)
 	after, err := os.ReadFile(m.File())
 	require.NoError(t, err)
-	assert.True(t, bytes.HasPrefix(after, before), "a stale manager must not overwrite another writer's records")
+	assert.Equal(t, before, after, "rejected writes must not touch the file")
+
+	// Owned reopen while the owner lives is refused outright.
+	_, err = OpenOwnedSession(m.File())
+	assert.ErrorIs(t, err, ErrSessionLocked)
+
+	// The legitimate owner keeps appending, append-only as before.
+	require.NoError(t, m.SetModel("next"))
+	after, err = os.ReadFile(m.File())
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(after, before), "owner records must append, never overwrite")
 	loaded, err := OpenSession(m.File())
 	require.NoError(t, err)
 	assert.Equal(t, "next", loaded.ModelName())
-	assert.Equal(t, other.Len()+1, loaded.Len())
 }
 
 func TestModelChangeAppendFailureIsRetryable(t *testing.T) {
@@ -130,11 +146,14 @@ func TestModelChangeInSessionWithoutAssistant(t *testing.T) {
 			path := filepath.Join(dir, "2026-01-01_session.jsonl")
 			data := []byte(`{"type":"EntrySession","id":"session","cwd":"/tmp"}` + "\n" + tc.body)
 			require.NoError(t, os.WriteFile(path, data, 0o600))
-			m, err := OpenSession(path)
+			// No live owner exists for the fixture file: open it for writing.
+			m, err := OpenOwnedSession(path)
 			require.NoError(t, err)
+			defer func() { _ = m.Close() }()
 			assert.Empty(t, m.ModelName())
 			fork, err := m.Fork()
 			require.NoError(t, err)
+			defer func() { _ = fork.Close() }()
 			loaded, err := OpenSession(fork.File())
 			require.NoError(t, err)
 			assert.Empty(t, loaded.ModelName())

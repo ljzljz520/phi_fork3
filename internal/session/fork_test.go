@@ -102,7 +102,13 @@ func TestForkRemovesCopyWhenReloadFails(t *testing.T) {
 	assert.Nil(t, fork)
 	files, err := os.ReadDir(src.config.sessionDir)
 	require.NoError(t, err)
-	assert.Len(t, files, 1, "a failed fork must not leave a file behind")
+	jsonl := 0
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".jsonl") {
+			jsonl++
+		}
+	}
+	assert.Equal(t, 1, jsonl, "a failed fork must not leave a session file behind")
 	after, err := os.ReadFile(src.File())
 	require.NoError(t, err)
 	assert.Equal(t, before, after)

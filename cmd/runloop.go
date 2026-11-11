@@ -143,6 +143,8 @@ func runHeadless(opts runOptions) error {
 		fmt.Fprintln(os.Stderr, "phi run:", err)
 		return exitCode(ExitUsage)
 	}
+	// Release ownership on exit so the next resume never waits on this process.
+	defer func() { _ = sess.Close() }()
 
 	engine, err := agent.NewEngine(bs.Config.Model(), sess, engineOpts...)
 	if err != nil {

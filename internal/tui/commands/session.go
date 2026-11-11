@@ -139,20 +139,26 @@ func (s *SessionCommands) resume(id string) {
 
 // Delete removes a session chosen in the picker overlay (Ctrl+X, then Y).
 // Deleting the current session also resets to a fresh one: the engine must
-// not keep appending to a file the user asked to remove.
+// release ownership and stop appending before the file it owns is removed.
+// The reset happens first, so a failed switch keeps the original session
+// alive and owned.
 func (s *SessionCommands) Delete(id string) {
 	if s.blocked("delete") {
 		return
 	}
 	dir, currentID := s.dirAndID()
+	if id == currentID {
+		if err := s.Ctrl.NewSession(); err != nil {
+			publishToast(s.Bus, err.Error(), toast.ToastError, 4*time.Second)
+			return
+		}
+		s.resetSessionView()
+	}
 	if err := session.DeleteSession(dir, id); err != nil {
 		publishToast(s.Bus, err.Error(), toast.ToastError, 4*time.Second)
 		return
 	}
 	publishToast(s.Bus, "Deleted "+session.ShortID(id), toast.ToastSuccess, 3*time.Second)
-	if id == currentID {
-		s.NewSession()
-	}
 	s.refreshPicker()
 }
 

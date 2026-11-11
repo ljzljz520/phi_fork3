@@ -94,8 +94,11 @@ func TestCompact_EmptyHistoryPreservesSummaryAfterReload(t *testing.T) {
 	require.NoError(t, err)
 	keptID, err := m.Append(llm.Message{Role: llm.RoleAssistant, Content: sizedContent(30)})
 	require.NoError(t, err)
-	m, err = session.OpenSession(m.File())
+	// Reload for writing: release the original owner first.
+	require.NoError(t, m.Close())
+	m, err = session.OpenOwnedSession(m.File())
 	require.NoError(t, err)
+	defer func() { _ = m.Close() }()
 
 	prep, err := PrepareCompact(m.BuildContext(), Settings{keepRecentTokens: 20})
 	require.NoError(t, err)
